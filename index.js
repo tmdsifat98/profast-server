@@ -7,6 +7,7 @@ const e = require("express");
 // const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 var admin = require("firebase-admin");
 var serviceAccount = require("./firebase-sdk.json");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -86,14 +87,28 @@ async function run() {
       res.send(result);
     });
 
-    //make admin finder
-    app.get("/users/search",verifyFirebaseToken, verifyAdmin, async (req, res) => {
-      const email = req.query.email;
-      const query = {};
-      query.email = { $regex: email, $options: "i" };
-      const result = await userCollection.find(query).toArray();
+    //get user by email
+    app.get("/users", verifyFirebaseToken, async (req, res) => {
+      const role = req.query.role;
+      const result = await userCollection
+        .find({ role: role || "user" })
+        .toArray();
       res.send(result);
     });
+
+    //make admin finder
+    app.get(
+      "/users/search",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        const email = req.query.email;
+        const query = {};
+        query.email = { $regex: email, $options: "i" };
+        const result = await userCollection.find(query).toArray();
+        res.send(result);
+      }
+    );
 
     //make admin
     app.patch(
@@ -125,10 +140,88 @@ async function run() {
       }
     );
 
-    //get parcels
-    app.post("/parcels", verifyFirebaseToken, async (req, res) => {
+
+    //post parcels
+    app.post("/parcels", async (req, res) => {
       const newParcel = req.body;
       const result = await parcelCollection.insertOne(newParcel);
+      res.send(result);
+    });
+
+    //get parcels
+    app.get("/parcels", verifyFirebaseToken, async (req, res) => {
+      const email = req.query.email;
+      const query = email ? { userEmail: email } : {};
+      const result = await parcelCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    //get parcels by status
+     app.get("/parcels-pending", async (req, res) => {
+      try {
+        const paymentStatus = req.query.payment_status;
+        const deliveryStatus = req.query.delivery_status;
+
+        const query = {};
+
+        if (paymentStatus) {
+          query.payment_status = paymentStatus;
+        }
+        if (deliveryStatus) {
+          query.delivery_status = deliveryStatus;
+        }
+
+        const parcels = await parcelCollection.find(query).toArray();
+        res.send(parcels);
+      } catch (error) {
+        console.error("Failed to get parcels:", error);
+        res.status(500).send({ message: "Internal server error" });
+      }
+    });
+
+    //update parcel payment status
+    app.patch("/parcel/:id", async (req, res) => {
+      const id = req.params.id;
+      const { payment_status } = req.body;
+      const result = await parcelCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { payment_status } }
+      );
+      res.send(result);
+    });
+
+    //get parcel by id
+    app.get("/parcel/:parcelId", async (req, res) => {
+      const parcelId = req.params.parcelId;
+      const query = { _id: new ObjectId(parcelId) };
+      const parcel = await parcelCollection.findOne(query);
+      if (!parcel) {
+        return res.status(404).send({ message: "Parcel not found" });
+      }
+      res.send(parcel);
+    });
+
+    //update parcels assigned rider
+    app.patch("/parcels/assign-rider/:id", async (req, res) => {
+      const id = req.params.id;
+      const { assigned_rider } = req.body;
+      // Check if the rider exists
+      const rider = await riderCollection.findOne({ email: assigned_rider });
+      if (!rider || rider.status !== "approved") {
+        return res
+          .status(404)
+          .send({ message: "Rider not found or not approved" });
+      }
+
+      const result = await parcelCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            assignedRider: assigned_rider,
+            delivery_statu: "waiting for pickup",
+          },
+        }
+      );
       res.send(result);
     });
 
@@ -228,6 +321,31 @@ async function run() {
         return res.status(404).json({ role: "unknown" });
       }
       res.send({ role: user.role || "user" });
+    });
+
+    //stripe payment intent
+    app.post("/create-payment-intent", async (req, res) => {
+      try {
+        const { amount } = req.body;
+
+        if (!amount) {
+          return res.status(400).send({ message: "Amount is required." });
+        }
+
+        // Stripe expects amount in the smallest currency unit (e.g., cents)
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount * 100, // Convert dollars to cents
+          currency: "usd", // Or "bdt" if supported in your account
+          payment_method_types: ["card"],
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (error) {
+        console.error("Payment Intent Error:", error);
+        res.status(500).send({ message: error.message });
+      }
     });
   } finally {
   }
